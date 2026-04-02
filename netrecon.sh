@@ -15,11 +15,11 @@
 #   help                 Show this help
 #
 # EXAMPLES:
-#   ./netrecon.sh init tango-internal
+#   ./netrecon.sh init acme-internal
 #   ./netrecon.sh run all
-#   ./netrecon.sh run 2 dc2
+#   ./netrecon.sh run 2 hq
 #   ./netrecon.sh run all --skip-phase6
-#   ./netrecon.sh resume ./engagements/tango-internal_20260402/
+#   ./netrecon.sh resume ./engagements/acme-internal_20260402/
 #
 # ============================================================
 
@@ -93,7 +93,7 @@ show_help() {
     echo "EXAMPLES:"
     echo "  ./netrecon.sh init mytest"
     echo "  ./netrecon.sh run all"
-    echo "  ./netrecon.sh run 2 dc2"
+    echo "  ./netrecon.sh run 2 hq"
     echo "  ./netrecon.sh run all --skip-phase6"
     echo ""
 }

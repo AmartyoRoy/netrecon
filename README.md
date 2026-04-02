@@ -33,7 +33,7 @@ sudo ./netrecon.sh run all
 
 # Or run specific phases / sites
 sudo ./netrecon.sh run 1           # Discovery only
-sudo ./netrecon.sh run 2 dc2       # Port scan DC2 only
+sudo ./netrecon.sh run 2 site_a    # Port scan a specific site only
 sudo ./netrecon.sh run all --skip-phase6
 ```
 
@@ -85,10 +85,10 @@ netrecon/
 ### `config/targets.conf`
 ```
 # SITE_NAME=CIDR
-dc2=10.0.254.0/24
-blr=10.80.254.0/24
-ksn=10.88.254.0/24
-log=10.6.254.0/24
+hq=192.168.1.0/24
+branch_ny=10.10.10.0/24
+datacenter=172.16.0.0/24
+dmz=10.20.0.0/24
 ```
 
 ### `config/scan_tuning.conf`
