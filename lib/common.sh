@@ -328,15 +328,16 @@ validate_target_arg() {
 # Iterate over target sites (handles 'all' or specific site)
 for_each_site() {
     local target=$1
-    shift
-    local callback="$@"
+    local fn=$2
 
-    if [ "$target" == "all" ]; then
-        for site in $(echo "${!TARGETS[@]}" | tr ' ' '\n' | sort); do
-            $callback "$site"
+    if [[ "$target" == "all" ]]; then
+        local sorted_sites
+        mapfile -t sorted_sites < <(printf '%s\n' "${!TARGETS[@]}" | sort)
+        for site in "${sorted_sites[@]}"; do
+            "$fn" "$site"
         done
     else
-        $callback "$target"
+        "$fn" "$target"
     fi
 }
 

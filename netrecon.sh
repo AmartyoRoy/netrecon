@@ -308,6 +308,10 @@ cmd_run() {
                 error "No engagement found. Run './netrecon.sh init <name>' first."
                 exit 1
             fi
+        else
+            # State file gave us a valid dir, but we still need LOGFILE + site dirs
+            load_targets || exit 1
+            use_engagement_dir "$ENGAGEMENT_DIR"
         fi
     fi
 
