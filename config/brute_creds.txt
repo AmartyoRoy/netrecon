@@ -1,0 +1,49 @@
+# ============================================================
+# NetRecon — Default Credential Pairs for Brute Force
+# ============================================================
+# Format: username:password (one per line)
+# Used by aggressive mode only (Phase 5: Brute Force)
+# Add organization-specific credentials as needed.
+# ============================================================
+
+# Generic defaults
+admin:admin
+admin:password
+admin:
+admin:123456
+admin:admin123
+root:root
+root:toor
+root:password
+root:
+user:user
+user:password
+test:test
+guest:guest
+guest:
+
+# Network device defaults
+cisco:cisco
+cisco:
+enable:
+admin:cisco
+admin:default
+
+# Management interface defaults
+admin:changeme
+manager:manager
+operator:operator
+monitor:monitor
+backup:backup
+support:support
+
+# Database defaults
+sa:
+sa:sa
+postgres:postgres
+mysql:mysql
+
+# Common service defaults
+ftp:ftp
+anonymous:
+anonymous:anonymous

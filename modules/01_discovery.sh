@@ -119,6 +119,32 @@ generate_discovery_summary() {
     success "Discovery summary: ${summary}"
 }
 
+# ---- Aggressive: OS Detection ----
+run_os_detection() {
+    local site=$1
+    local hostfile=$(live_hosts_file "$site")
+
+    if [[ ! -s "$hostfile" ]]; then
+        return
+    fi
+
+    if ! is_aggressive; then
+        return
+    fi
+
+    local outdir="$(site_dir "$site")/nmap"
+    local hostcount=$(wc -l < "$hostfile")
+    log "Phase 1.3 [AGGRESSIVE]: OS Detection — ${site^^} (${hostcount} hosts)"
+
+    timed_run "OS detection ${site^^}" \
+        sudo nmap -O --osscan-guess \
+        $(aggressive_timing "$site") --max-rate=$(aggressive_rate ${DISCOVERY_RATE}) \
+        -iL "$hostfile" \
+        -oA "${outdir}/os_detection_${TIMESTAMP}"
+
+    success "OS detection complete for ${site^^}"
+}
+
 # ---- Main Execution ----
 run_discovery() {
     local site=$1
@@ -127,13 +153,14 @@ run_discovery() {
     header "MODULE 01: HOST DISCOVERY — ${site^^}"
 
     # Clear previous live_hosts if force rescan
-    if [ "${FORCE_RESCAN:-false}" == "true" ]; then
+    if [[ "${FORCE_RESCAN:-false}" == "true" ]]; then
         > "$(live_hosts_file "$site")"
     fi
 
     run_arp_discovery "$site"
     run_ping_sweep "$site"
     consolidate_hosts "$site"
+    run_os_detection "$site"
     generate_discovery_summary "$site"
 
     separator

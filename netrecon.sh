@@ -52,6 +52,7 @@ parse_args() {
             --phase6-packets=*)   PHASE6_PACKETS="${arg#*=}" ;;
             --phase=*)            PHASE_NUM="${arg#*=}" ;;
             --site=*)             TARGET_SITE="${arg#*=}" ;;
+            --mode=*)             SCAN_MODE="${arg#*=}"; export SCAN_MODE ;;
             -h|--help)            show_help; exit 0 ;;
             *)
                 # Positional arg handling depends on command
@@ -92,6 +93,7 @@ show_help() {
     echo "  help                   Show this help"
     echo ""
     echo "OPTIONS:"
+    echo "  --mode=safe|aggressive Scan mode (default: safe)"
     echo "  --skip-phase6          Skip passive traffic capture"
     echo "  --phase6-interface=X   Capture interface (default: eth0)"
     echo "  --phase6-duration=X    Capture duration in seconds (default: 600)"
@@ -101,15 +103,23 @@ show_help() {
     echo "  ./netrecon.sh run all"
     echo "  ./netrecon.sh run 2 hq"
     echo "  ./netrecon.sh run all --skip-phase6"
+    echo "  ./netrecon.sh run all --mode=aggressive"
     echo ""
 }
 
 show_banner() {
     echo ""
-    echo -e "${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║   ${CYAN}NetRecon${NC}${BOLD} — Internal Network Pentest Automation         ║${NC}"
-    echo -e "${BOLD}║   Non-intrusive • Modular • Rate-limited                  ║${NC}"
-    echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
+    if is_aggressive; then
+        echo -e "${RED}╔════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${RED}║   ${BOLD}NetRecon${NC}${RED} — Internal Network Pentest Automation         ║${NC}"
+        echo -e "${RED}║   ⚠ AGGRESSIVE MODE • Intrusive • High-Rate              ║${NC}"
+        echo -e "${RED}╚════════════════════════════════════════════════════════════╝${NC}"
+    else
+        echo -e "${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BOLD}║   ${CYAN}NetRecon${NC}${BOLD} — Internal Network Pentest Automation         ║${NC}"
+        echo -e "${BOLD}║   Non-intrusive • Modular • Rate-limited                  ║${NC}"
+        echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
+    fi
     echo ""
 }
 
@@ -119,14 +129,26 @@ run_preflight_checks() {
 
     # Check modules exist
     local modules_ok=true
-    for m in 01_discovery 02_port_scan 03_snmp_enum 04_vuln_scan 06_protocol_analysis 07_report; do
-        if [ -f "${MODULES_DIR}/${m}.sh" ]; then
+    local module_list=(01_discovery 02_port_scan 03_snmp_enum 04_vuln_scan 06_protocol_analysis 07_report)
+    if is_aggressive; then
+        module_list+=(05_brute_force)
+    fi
+    for m in "${module_list[@]}"; do
+        if [[ -f "${MODULES_DIR}/${m}.sh" ]]; then
             echo -e "${GREEN}  ✓${NC} ${m}.sh"
         else
             echo -e "${RED}  ✗${NC} ${m}.sh MISSING"
             modules_ok=false
         fi
     done
+
+    # Show scan mode
+    echo ""
+    if is_aggressive; then
+        echo -e "${RED}[PREFLIGHT]${NC} Scan mode: ${RED}AGGRESSIVE${NC}"
+    else
+        echo -e "${CYAN}[PREFLIGHT]${NC} Scan mode: ${GREEN}SAFE${NC}"
+    fi
 
     # Check required tools
     echo ""
@@ -139,7 +161,11 @@ run_preflight_checks() {
             return 1
         fi
     done
-    for tool in tshark tcpdump onesixtyone snmpwalk ssh-audit snmp-check arp-scan; do
+    local optional_tools=(tshark tcpdump onesixtyone snmpwalk ssh-audit snmp-check arp-scan)
+    if is_aggressive; then
+        optional_tools+=(hydra medusa searchsploit)
+    fi
+    for tool in "${optional_tools[@]}"; do
         if check_tool "$tool"; then
             echo -e "${GREEN}  ✓${NC} ${tool}"
         else
@@ -175,6 +201,7 @@ run_phase() {
         2) phase_name="Phase 2: Port Scanning";             script="02_port_scan.sh" ;;
         3) phase_name="Phase 3: SNMP Enumeration";          script="03_snmp_enum.sh" ;;
         4) phase_name="Phase 4: Vulnerability Scanning";    script="04_vuln_scan.sh" ;;
+        5) phase_name="Phase 5: Credential Testing";        script="05_brute_force.sh" ;;
         6) phase_name="Phase 6: Protocol Analysis";         script="06_protocol_analysis.sh" ;;
         7) phase_name="Phase 7: Report Generation";         script="07_report.sh" ;;
         *) error "Unknown phase: $phase"; return 1 ;;
@@ -319,11 +346,21 @@ cmd_run() {
 
     echo -e "  Target:       ${GREEN}${target}${NC}"
     echo -e "  Phase:        ${phase}"
+    if is_aggressive; then
+        echo -e "  Mode:         ${RED}AGGRESSIVE${NC}"
+    else
+        echo -e "  Mode:         ${GREEN}safe${NC}"
+    fi
     echo -e "  Skip Phase 6: ${SKIP_PHASE6}"
     echo -e "  Engagement:   ${ENGAGEMENT_DIR}"
     echo ""
 
     run_preflight_checks
+
+    # Aggressive mode requires explicit confirmation
+    if is_aggressive; then
+        require_aggressive_confirmation
+    fi
 
     echo -e "${BOLD}Starting in ${PREFLIGHT_WAIT:-5} seconds... Press Ctrl+C to abort.${NC}"
     sleep ${PREFLIGHT_WAIT:-5}
@@ -337,12 +374,16 @@ cmd_run() {
         run_phase 3 "$target"
         run_phase 4 "$target"
 
-        # Phase 5 (WiFi) — always manual
-        echo ""
-        echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
-        echo -e "${YELLOW} PHASE 5: WiFi Assessment — SKIPPED (requires manual run)${NC}"
-        echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
-        echo ""
+        # Phase 5: Brute Force (aggressive only) or WiFi note
+        if is_aggressive; then
+            run_phase 5 "$target"
+        else
+            echo ""
+            echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+            echo -e "${YELLOW} PHASE 5: WiFi Assessment — SKIPPED (requires manual run)${NC}"
+            echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
+            echo ""
+        fi
 
         if [[ "$SKIP_PHASE6" == "false" ]]; then
             run_phase 6 "$target"

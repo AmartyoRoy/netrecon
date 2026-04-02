@@ -108,6 +108,42 @@ run_udp_critical() {
     success "Phase 2.3 complete for ${site^^}"
 }
 
+# ---- Aggressive: Full TCP 65535 ----
+run_tcp_full() {
+    local site=$1
+
+    if ! is_aggressive; then
+        return
+    fi
+
+    local timing=$(aggressive_timing "$site")
+    local hostfile=$(live_hosts_file "$site")
+    local outdir="$(site_dir "$site")/nmap"
+
+    if [[ ! -s "$hostfile" ]]; then
+        return
+    fi
+
+    local hostcount=$(wc -l < "$hostfile")
+    log "Phase 2.4 [AGGRESSIVE]: Full TCP 65535 — ${site^^} (${hostcount} hosts)"
+    warn "Full port scan — this will take a long time..."
+
+    mkdir -p "$outdir"
+
+    timed_run "Full TCP scan ${site^^}" \
+        sudo nmap -sS -sV --version-all -O --osscan-guess \
+        ${timing} --max-rate=$(aggressive_rate ${TCP_SCAN_RATE}) --open \
+        -p- \
+        -iL "$hostfile" \
+        -oA "${outdir}/tcp_full_65535_${TIMESTAMP}"
+
+    parse_nmap_summary "${outdir}/tcp_full_65535_${TIMESTAMP}" \
+        "${outdir}/tcp_full_65535_SUMMARY.txt" \
+        "Full TCP 65535 Ports [AGGRESSIVE] — ${site^^}"
+
+    success "Phase 2.4 full TCP scan complete for ${site^^}"
+}
+
 # ---- Run all port scans for a site ----
 run_port_scan() {
     local site=$1
@@ -118,6 +154,7 @@ run_port_scan() {
     run_tcp_top1000 "$site"
     run_infra_ports "$site"
     run_udp_critical "$site"
+    run_tcp_full "$site"
 
     separator
 }

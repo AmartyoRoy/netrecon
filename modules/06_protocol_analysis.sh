@@ -158,12 +158,109 @@ generate_protocol_summary() {
     done
 }
 
+# ---- Aggressive: Active Protocol Probing ----
+run_aggressive_protocol_checks() {
+    if ! is_aggressive; then
+        return
+    fi
+
+    require_tool "tshark" "apt install tshark" || return 1
+    log "Phase 6.3 [AGGRESSIVE]: Active Protocol Analysis"
+    local ad="${EVIDENCE_DIR}/analysis"
+
+    # LLMNR / NBNS / mDNS — name resolution poisoning vectors
+    log "  [6.3.1] LLMNR/NBNS/mDNS poisoning vectors..."
+    tshark -r "$FULL_PCAP" -Y "llmnr or nbns or mdns" \
+        -T fields -e frame.number -e ip.src -e ip.dst -e _ws.col.Protocol \
+        -e dns.qry.name -e _ws.col.Info \
+        -E header=y -E separator='|' 2>/dev/null > "${ad}/llmnr_nbns_mdns.txt" || true
+
+    # WPAD detection
+    log "  [6.3.2] WPAD broadcast detection..."
+    tshark -r "$FULL_PCAP" -Y "dns.qry.name contains \"wpad\" or http.host contains \"wpad\"" \
+        -T fields -e frame.number -e ip.src -e ip.dst -e dns.qry.name -e http.host \
+        -E header=y -E separator='|' 2>/dev/null > "${ad}/wpad_detection.txt" || true
+
+    # ARP anomalies (gratuitous ARP, ARP storms, duplicate IPs)
+    log "  [6.3.3] ARP anomaly detection..."
+    tshark -r "$FULL_PCAP" -Y "arp.duplicate-address-detected or arp.opcode == 2" \
+        -T fields -e frame.number -e arp.src.hw_mac -e arp.src.proto_ipv4 \
+        -e arp.dst.proto_ipv4 -e _ws.col.Info \
+        -E header=y -E separator='|' 2>/dev/null > "${ad}/arp_anomalies.txt" || true
+
+    # DTP VLAN hopping feasibility
+    log "  [6.3.4] DTP VLAN hopping feasibility..."
+    local dtp_count=$(_fc "${ad}/dtp_frames.txt")
+    if [[ "$dtp_count" -gt 1 ]]; then
+        warn "DTP frames detected — VLAN hopping may be feasible"
+        echo "⚠ DTP frames detected (${dtp_count} frames). Trunk negotiation is possible." \
+            > "${ad}/vlan_hopping_feasibility.txt"
+        echo "Recommendation: Enable 'switchport nonegotiate' on all access ports." \
+            >> "${ad}/vlan_hopping_feasibility.txt"
+    fi
+
+    # SNMPv1/v2c cleartext community strings in traffic
+    log "  [6.3.5] SNMP cleartext community strings in traffic..."
+    tshark -r "$FULL_PCAP" -Y "snmp" \
+        -T fields -e frame.number -e ip.src -e ip.dst -e snmp.community \
+        -E header=y -E separator='|' 2>/dev/null > "${ad}/snmp_cleartext.txt" || true
+
+    success "Phase 6.3 aggressive protocol analysis complete"
+}
+
+# ---- Update summary for aggressive findings ----
+append_aggressive_summary() {
+    if ! is_aggressive; then
+        return
+    fi
+
+    local s="${EVIDENCE_DIR}/PROTOCOL_ANALYSIS_SUMMARY.txt"
+    local ad="${EVIDENCE_DIR}/analysis"
+
+    {
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔴 AGGRESSIVE MODE — ADDITIONAL FINDINGS"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+
+        local aggressive_checks=(
+            "llmnr_nbns_mdns.txt:🔴 LLMNR/NBNS/mDNS POISONING VECTORS"
+            "wpad_detection.txt:🔴 WPAD BROADCAST DETECTION"
+            "arp_anomalies.txt:🟡 ARP ANOMALIES"
+            "snmp_cleartext.txt:🟡 SNMP CLEARTEXT COMMUNITIES IN TRAFFIC"
+            "vlan_hopping_feasibility.txt:🔴 VLAN HOPPING FEASIBILITY"
+        )
+        for entry in "${aggressive_checks[@]}"; do
+            local file="${entry%%:*}"
+            local title="${entry#*:}"
+            echo "$title:"
+            local c=$(_fc "${ad}/${file}")
+            if [[ "$c" -gt 1 ]]; then
+                echo "  ⚠ ${c} events captured. Details: analysis/${file}"
+                head -10 "${ad}/${file}" 2>/dev/null | sed 's/^/  /'
+            elif [[ -s "${ad}/${file}" ]]; then
+                cat "${ad}/${file}" | sed 's/^/  /'
+            else
+                echo "  ✓ None observed"
+            fi
+            echo ""
+        done
+    } >> "$s"
+}
+
 main() {
     require_tool "tcpdump" "apt install tcpdump" || exit 1
-    header "NETRECON — Phase 6: Passive Protocol Analysis"
+    if is_aggressive; then
+        header "NETRECON — Phase 6: Protocol Analysis [AGGRESSIVE]"
+    else
+        header "NETRECON — Phase 6: Passive Protocol Analysis"
+    fi
     run_passive_capture
     run_protocol_analysis
     generate_protocol_summary
+    run_aggressive_protocol_checks
+    append_aggressive_summary
     echo ""
     success "Phase 6: Protocol Analysis complete"
 }

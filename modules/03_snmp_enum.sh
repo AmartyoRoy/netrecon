@@ -235,6 +235,55 @@ generate_snmp_summary() {
     success "SNMP summary: ${summary}"
 }
 
+# ---- Aggressive: SNMP Brute + Write Community Test ----
+run_snmp_aggressive() {
+    local site=$1
+
+    if ! is_aggressive; then
+        return
+    fi
+
+    local snmp_hosts_file="$(site_dir "$site")/enum/snmp_hosts.txt"
+    if [[ ! -s "$snmp_hosts_file" ]]; then
+        return
+    fi
+
+    log "Phase 3.3 [AGGRESSIVE]: Extended SNMP Brute — ${site^^}"
+    local enumdir="$(site_dir "$site")/enum"
+
+    # nmap snmp-brute with extended community list
+    timed_run "SNMP nmap brute ${site^^}" \
+        sudo nmap -sU -p 161 --open \
+        --script=snmp-brute \
+        --script-args="snmp-brute.communitiesdb=${CONFIG_DIR}/snmp_communities.txt,brute.threads=${BRUTE_FORCE_THREADS:-4}" \
+        $(aggressive_timing "$site") \
+        -iL "$snmp_hosts_file" \
+        -oA "${enumdir}/snmp_brute_${TIMESTAMP}" || true
+
+    # Test write community strings
+    log "  Testing write community access..."
+    local communities_file="${enumdir}/snmp_communities_found.txt"
+    if [[ -s "$communities_file" ]]; then
+        grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3} \[[^]]+\]' "$communities_file" 2>/dev/null | \
+        while IFS= read -r match; do
+            local ip=$(echo "$match" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+            local community=$(echo "$match" | grep -oP '\[\K[^\]]+')
+
+            # Test write access (set sysLocation to itself — non-destructive)
+            local current_loc
+            current_loc=$(timeout 10 snmpget -v2c -c "$community" "$ip" 1.3.6.1.2.1.1.6.0 2>/dev/null | awk -F': ' '{print $2}')
+            if [[ -n "$current_loc" ]]; then
+                if timeout 10 snmpset -v2c -c "$community" "$ip" 1.3.6.1.2.1.1.6.0 s "$current_loc" 2>/dev/null; then
+                    echo "⚠ WRITE ACCESS: ${ip} community='${community}'" >> "${enumdir}/snmp_write_access.txt"
+                    warn "WRITE community found: ${ip} with '${community}'"
+                fi
+            fi
+        done
+    fi
+
+    success "Phase 3.3 aggressive SNMP complete for ${site^^}"
+}
+
 # ---- Run all SNMP tasks for a site ----
 run_snmp_enum() {
     local site=$1
@@ -244,6 +293,7 @@ run_snmp_enum() {
 
     run_snmp_community_scan "$site"
     run_snmp_walk "$site"
+    run_snmp_aggressive "$site"
     generate_snmp_summary "$site"
 
     separator

@@ -15,7 +15,19 @@ REPORT_CSV="${ENGAGEMENT_DIR}/NETRECON_FINDINGS_${TIMESTAMP}.csv"
 
 # ---- Report Header ----
 write_header() {
-    cat > "$REPORT_FILE" << 'HEADER'
+    if is_aggressive; then
+        cat > "$REPORT_FILE" << 'HEADER'
+╔════════════════════════════════════════════════════════════════════╗
+║                                                                    ║
+║       INTERNAL NETWORK PENETRATION TEST REPORT                     ║
+║       NetRecon — Aggressive Assessment                             ║
+║       ⚠ INTRUSIVE TESTING PERFORMED                                ║
+║                                                                    ║
+╚════════════════════════════════════════════════════════════════════╝
+
+HEADER
+    else
+        cat > "$REPORT_FILE" << 'HEADER'
 ╔════════════════════════════════════════════════════════════════════╗
 ║                                                                    ║
 ║       INTERNAL NETWORK PENETRATION TEST REPORT                     ║
@@ -24,11 +36,13 @@ write_header() {
 ╚════════════════════════════════════════════════════════════════════╝
 
 HEADER
+    fi
 
     cat >> "$REPORT_FILE" << EOF
 Report Generated: $(date)
 Report File: ${REPORT_FILE}
 Engagement Dir: ${ENGAGEMENT_DIR}
+Scan Mode: ${SCAN_MODE^^}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. EXECUTIVE SUMMARY
@@ -42,12 +56,21 @@ EOF
         printf "  %-8s %s\n" "${site^^}" "$cidr" >> "$REPORT_FILE"
     done
 
-    cat >> "$REPORT_FILE" << EOF
+    if is_aggressive; then
+        cat >> "$REPORT_FILE" << EOF
+
+Testing Type: Aggressive (Discovery, Enumeration, Vulnerability ID, Exploit Validation, Credential Testing)
+Testing Approach: Includes brute-force, vulnerability exploitation scripts, active protocol probing
+
+EOF
+    else
+        cat >> "$REPORT_FILE" << EOF
 
 Testing Type: Non-Intrusive (Discovery, Enumeration, Vulnerability ID)
 Testing Approach: No exploits, no brute-force, no DoS
 
 EOF
+    fi
 }
 
 # ---- Host Discovery Summary ----
@@ -193,6 +216,29 @@ write_protocol_findings() {
     fi
 }
 
+# ---- Brute Force / Credential Testing (Aggressive only) ----
+write_brute_findings() {
+    if ! is_aggressive; then
+        return
+    fi
+
+    echo "" >> "$REPORT_FILE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> "$REPORT_FILE"
+    echo "6.5 CREDENTIAL TESTING FINDINGS [AGGRESSIVE]" >> "$REPORT_FILE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> "$REPORT_FILE"
+
+    for site in $(echo "${!TARGETS[@]}" | tr ' ' '\n' | sort); do
+        echo "" >> "$REPORT_FILE"
+        echo "  --- ${site^^} ---" >> "$REPORT_FILE"
+        local bf="$(site_dir "$site")/vulns/brute/BRUTE_FORCE_SUMMARY.txt"
+        if [[ -f "$bf" ]]; then
+            sed 's/^/  /' "$bf" >> "$REPORT_FILE"
+        else
+            echo "    (not yet completed)" >> "$REPORT_FILE"
+        fi
+    done
+}
+
 # ---- Recommendations ----
 write_recommendations() {
     echo "" >> "$REPORT_FILE"
@@ -282,6 +328,30 @@ generate_csv() {
             grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}.*\[public\]' "${sd}/enum/snmp_communities_found.txt" 2>/dev/null | \
                 awk -v s="${site^^}" -F'[' '{gsub(/ /,"",$1); print s",Critical,Default SNMP (public),"$1",161,Default read community"}' >> "$REPORT_CSV" || true
         fi
+
+        # Aggressive-only CSV entries
+        if is_aggressive; then
+            # SMB vulnerabilities (EternalBlue etc)
+            for f in "${sd}/vulns/smb_vulns"*.gnmap; do
+                [[ -f "$f" ]] && grep "445/open" "$f" 2>/dev/null | \
+                    awk -v s="${site^^}" '{print s",Critical,SMB Vulnerability,"$2",445,MS17-010/MS08-067 check"}' >> "$REPORT_CSV" || true
+            done
+            # RDP vulnerabilities
+            for f in "${sd}/vulns/rdp_checks"*.gnmap; do
+                [[ -f "$f" ]] && grep "3389/open" "$f" 2>/dev/null | \
+                    awk -v s="${site^^}" '{print s",High,RDP Exposed,"$2",3389,MS12-020 check"}' >> "$REPORT_CSV" || true
+            done
+            # Brute force successes
+            for f in "${sd}/vulns/brute/"*.nmap; do
+                [[ -f "$f" ]] && grep -i "Valid credentials\|Login succeeded" "$f" 2>/dev/null | \
+                    awk -v s="${site^^}" '{print s",Critical,Default Credentials,N/A,N/A,"$0}' >> "$REPORT_CSV" || true
+            done
+            # SNMP write access
+            if [[ -f "${sd}/enum/snmp_write_access.txt" ]]; then
+                awk -v s="${site^^}" '{print s",Critical,SNMP Write Access,N/A,161,"$0}' \
+                    "${sd}/enum/snmp_write_access.txt" >> "$REPORT_CSV" || true
+            fi
+        fi
     done
 }
 
@@ -308,6 +378,7 @@ main() {
     write_vuln_findings
     write_snmp_findings
     write_protocol_findings
+    write_brute_findings
     write_recommendations
     write_environment
     write_footer

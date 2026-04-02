@@ -330,6 +330,123 @@ generate_vuln_summary() {
     success "Vulnerability summary: ${summary}"
 }
 
+# ---- Aggressive: Vuln + Exploit NSE ----
+run_nse_aggressive() {
+    local site=$1
+
+    if ! is_aggressive; then
+        return
+    fi
+
+    local timing=$(aggressive_timing "$site")
+    local hostfile=$(live_hosts_file "$site")
+
+    if [[ ! -s "$hostfile" ]]; then
+        return
+    fi
+
+    local hostcount=$(wc -l < "$hostfile")
+    log "Phase 4.4 [AGGRESSIVE]: Vuln+Exploit NSE — ${site^^} (${hostcount} hosts)"
+
+    local vulndir="$(site_dir "$site")/vulns"
+    mkdir -p "$vulndir"
+
+    # Vuln category (includes exploit validation, NOT dos)
+    timed_run "NSE vuln+exploit ${site^^}" \
+        sudo nmap -sV --script="vuln and not dos" \
+        ${timing} --max-rate=$(aggressive_rate ${VULN_SCAN_RATE}) \
+        -iL "$hostfile" \
+        -oA "${vulndir}/nse_vuln_exploit_${TIMESTAMP}"
+
+    success "Phase 4.4 aggressive NSE scan complete for ${site^^}"
+}
+
+# ---- Aggressive: SMB Vulnerability Checks ----
+run_smb_checks() {
+    local site=$1
+
+    if ! is_aggressive; then
+        return
+    fi
+
+    local hostfile=$(live_hosts_file "$site")
+    if [[ ! -s "$hostfile" ]]; then
+        return
+    fi
+
+    log "Phase 4.5 [AGGRESSIVE]: SMB Vulnerability Checks — ${site^^}"
+    local vulndir="$(site_dir "$site")/vulns"
+
+    # EternalBlue (MS17-010)
+    timed_run "SMB MS17-010 check ${site^^}" \
+        sudo nmap -p 445 --open \
+        --script=smb-vuln-ms17-010,smb-vuln-ms08-067,smb-vuln-ms10-054 \
+        $(aggressive_timing "$site") -iL "$hostfile" \
+        -oA "${vulndir}/smb_vulns_${TIMESTAMP}"
+
+    # SMB enumeration
+    timed_run "SMB enum ${site^^}" \
+        sudo nmap -p 139,445 --open \
+        --script=smb-enum-shares,smb-enum-users,smb-os-discovery,smb-protocols \
+        $(aggressive_timing "$site") -iL "$hostfile" \
+        -oA "${vulndir}/smb_enum_${TIMESTAMP}"
+
+    success "Phase 4.5 SMB checks complete for ${site^^}"
+}
+
+# ---- Aggressive: RDP Checks ----
+run_rdp_checks() {
+    local site=$1
+
+    if ! is_aggressive; then
+        return
+    fi
+
+    local hostfile=$(live_hosts_file "$site")
+    if [[ ! -s "$hostfile" ]]; then
+        return
+    fi
+
+    log "Phase 4.6 [AGGRESSIVE]: RDP Vulnerability Checks — ${site^^}"
+    local vulndir="$(site_dir "$site")/vulns"
+
+    timed_run "RDP vuln check ${site^^}" \
+        sudo nmap -p 3389 --open \
+        --script=rdp-vuln-ms12-020,rdp-enum-encryption,rdp-ntlm-info \
+        $(aggressive_timing "$site") -iL "$hostfile" \
+        -oA "${vulndir}/rdp_checks_${TIMESTAMP}"
+
+    success "Phase 4.6 RDP checks complete for ${site^^}"
+}
+
+# ---- Aggressive: searchsploit integration ----
+run_searchsploit() {
+    local site=$1
+
+    if ! is_aggressive; then
+        return
+    fi
+
+    if ! check_tool "searchsploit"; then
+        warn "searchsploit not found — skipping exploit-db lookup"
+        return
+    fi
+
+    log "Phase 4.7 [AGGRESSIVE]: searchsploit — ${site^^}"
+    local vulndir="$(site_dir "$site")/vulns"
+
+    # Find nmap XML files and search exploit-db
+    for f in "$(site_dir "$site")/nmap/"*.xml "${vulndir}/"*.xml; do
+        if [[ -f "$f" ]]; then
+            log "  Searching exploits for $(basename "$f")..."
+            searchsploit --nmap "$f" 2>/dev/null \
+                | tee -a "${vulndir}/searchsploit_results_${TIMESTAMP}.txt" || true
+        fi
+    done
+
+    success "Phase 4.7 searchsploit complete for ${site^^}"
+}
+
 # ---- Run all vuln tasks for a site ----
 run_vuln_scan() {
     local site=$1
@@ -340,6 +457,10 @@ run_vuln_scan() {
     run_nse_safe "$site"
     run_targeted_vulns "$site"
     run_ssh_audit "$site"
+    run_nse_aggressive "$site"
+    run_smb_checks "$site"
+    run_rdp_checks "$site"
+    run_searchsploit "$site"
     generate_vuln_summary "$site"
 
     separator
