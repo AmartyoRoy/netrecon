@@ -1,0 +1,27 @@
+# ============================================================
+# NetRecon — Target Configuration
+# ============================================================
+#
+# Define your engagement targets here.
+# Format: SITE_NAME=CIDR
+#
+# Example:
+#   hq=192.168.1.0/24
+#   branch_ny=10.10.10.0/24
+#   dmz=172.16.0.0/24
+#
+# Rules:
+#   - Site names must be lowercase, alphanumeric + underscores only
+#   - One CIDR per line
+#   - Lines starting with # are comments
+#   - Empty lines are ignored
+#
+# IMPORTANT: Do NOT commit this file with real target IPs.
+#            The .gitignore excludes config/targets.conf
+#            A template (targets.conf.example) is tracked instead.
+# ============================================================
+
+# --- Define your targets below ---
+# hq=192.168.1.0/24
+# datacenter=10.0.0.0/24
+# branch_office=10.20.0.0/24

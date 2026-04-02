@@ -1,0 +1,45 @@
+# NetRecon - Ignore scan outputs and engagement data
+# Never commit actual scan results to the repo
+
+# Engagement output directories
+engagements/
+output/
+results/
+
+# Pcap files
+*.pcap
+*.pcapng
+*.cap
+
+# Nmap outputs
+*.nmap
+*.gnmap
+*.xml
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# Custom config with real targets (template is tracked)
+config/targets.conf
+
+# SSH keys or credentials (should never be here)
+*.pem
+*.key
+id_rsa*

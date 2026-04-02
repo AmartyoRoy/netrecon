@@ -1,0 +1,37 @@
+# ============================================================
+# NetRecon — SNMP Community Strings Wordlist
+# ============================================================
+# Common/default community strings to test.
+# Add organization-specific strings as needed.
+# These are READ-ONLY tests — no write operations.
+# ============================================================
+public
+private
+community
+manager
+cisco
+default
+monitor
+admin
+snmp
+secret
+network
+read
+write
+internal
+switch
+router
+cable-docsis
+ILMI
+test
+guest
+operator
+security
+system
+cable
+netman
+superuser
+mngt
+password
+all private
+all public
