@@ -27,14 +27,17 @@ cp config/targets.conf.example config/targets.conf
 # 3. Initialize an engagement
 sudo ./netrecon.sh init my-assessment
 
-# 4. Resume and run all phases
-sudo ./netrecon.sh resume
+# 4. Run all phases (auto-resumes latest engagement)
 sudo ./netrecon.sh run all
 
 # Or run specific phases / sites
 sudo ./netrecon.sh run 1           # Discovery only
 sudo ./netrecon.sh run 2 site_a    # Port scan a specific site only
+sudo ./netrecon.sh run --phase=2 --site=site_a  # Explicit form
 sudo ./netrecon.sh run all --skip-phase6
+
+# Resume a specific engagement (if not the latest)
+sudo ./netrecon.sh resume ./engagements/my-assessment_20260402_120000/
 ```
 
 ## Phases

@@ -40,31 +40,36 @@ PHASE6_DURATION=""
 PHASE6_PACKETS=""
 TARGET_SITE="all"
 ENGAGEMENT_NAME=""
+PHASE_NUM=""
 RESUME_DIR=""
 
 parse_args() {
     for arg in "$@"; do
         case $arg in
-            --skip-phase6)       SKIP_PHASE6=true ;;
+            --skip-phase6)        SKIP_PHASE6=true ;;
             --phase6-interface=*) PHASE6_IFACE="${arg#*=}" ;;
             --phase6-duration=*)  PHASE6_DURATION="${arg#*=}" ;;
             --phase6-packets=*)   PHASE6_PACKETS="${arg#*=}" ;;
+            --phase=*)            PHASE_NUM="${arg#*=}" ;;
+            --site=*)             TARGET_SITE="${arg#*=}" ;;
             -h|--help)            show_help; exit 0 ;;
             *)
-                # First positional arg depends on command
-                if [ -z "$ENGAGEMENT_NAME" ] && [ "$COMMAND" == "init" ]; then
+                # Positional arg handling depends on command
+                if [[ "$COMMAND" == "init" ]] && [[ -z "$ENGAGEMENT_NAME" ]]; then
                     ENGAGEMENT_NAME="$arg"
-                elif [ -z "$RESUME_DIR" ] && [ "$COMMAND" == "resume" ]; then
+                elif [[ "$COMMAND" == "resume" ]] && [[ -z "$RESUME_DIR" ]]; then
                     RESUME_DIR="$arg"
-                elif [[ "$arg" =~ ^[0-9]+$ ]] || [ "$arg" == "all" ]; then
-                    # Could be phase number or site name
-                    if [[ "$arg" =~ ^[0-9]+$ ]]; then
+                elif [[ "$COMMAND" == "run" ]]; then
+                    # Phase number (digits or 'all') comes first, then site
+                    if [[ -z "$PHASE_NUM" ]] && { [[ "$arg" =~ ^[0-9]+$ ]] || [[ "$arg" == "all" ]]; }; then
                         PHASE_NUM="$arg"
-                    else
+                    elif [[ -n "$PHASE_NUM" ]]; then
                         TARGET_SITE="$arg"
+                    else
+                        error "Ambiguous argument '$arg'. Use --phase=N --site=NAME for clarity."
+                        error "Or pass phase number first: ./netrecon.sh run <phase> [site]"
+                        exit 1
                     fi
-                else
-                    TARGET_SITE="$arg"
                 fi
                 ;;
         esac
@@ -82,6 +87,7 @@ show_help() {
     echo "  init <name>            Create a new engagement"
     echo "  resume <dir>           Resume an existing engagement"
     echo "  run <phase> [site]     Run phase: 1,2,3,4,6,7,all"
+    echo "  run --phase=N --site=S Explicit phase/site selection"
     echo "  status                 Show engagement status"
     echo "  help                   Show this help"
     echo ""
@@ -188,28 +194,31 @@ run_phase() {
 
     # Build args for protocol analysis
     local extra_args=()
-    if [ "$phase" == "6" ]; then
-        [ -n "$PHASE6_IFACE" ] && extra_args+=("$PHASE6_IFACE")
-        [ -n "$PHASE6_DURATION" ] && extra_args+=("$PHASE6_DURATION")
-        [ -n "$PHASE6_PACKETS" ] && extra_args+=("$PHASE6_PACKETS")
+    if [[ "$phase" == "6" ]]; then
+        [[ -n "$PHASE6_IFACE" ]] && extra_args+=("$PHASE6_IFACE")
+        [[ -n "$PHASE6_DURATION" ]] && extra_args+=("$PHASE6_DURATION")
+        [[ -n "$PHASE6_PACKETS" ]] && extra_args+=("$PHASE6_PACKETS")
         bash "$script_path" "${extra_args[@]}" 2>&1 | tee -a "${LOGFILE:-/dev/null}"
-    elif [ "$phase" == "7" ]; then
+    elif [[ "$phase" == "7" ]]; then
         bash "$script_path" 2>&1 | tee -a "${LOGFILE:-/dev/null}"
     else
         bash "$script_path" "$target" 2>&1 | tee -a "${LOGFILE:-/dev/null}"
     fi
 
-    local exit_code=${PIPESTATUS[0]}
+    # IMPORTANT: Declare 'local' separately to avoid masking PIPESTATUS.
+    # 'local var=${PIPESTATUS[0]}' always returns 0 (exit code of 'local').
+    local exit_code
+    exit_code=${PIPESTATUS[0]}
     local phase_end=$(date +%s)
     local elapsed=$(( phase_end - phase_start ))
     local min=$(( elapsed / 60 ))
     local sec=$(( elapsed % 60 ))
 
-    if [ $exit_code -eq 0 ]; then
+    if [[ $exit_code -eq 0 ]]; then
         echo -e "${GREEN}[OK]${NC} ${phase_name} completed in ${min}m ${sec}s"
     else
         echo -e "${RED}[FAIL]${NC} ${phase_name} failed (exit ${exit_code}) in ${min}m ${sec}s"
-        if [ "${CONTINUE_ON_ERROR:-true}" == "true" ]; then
+        if [[ "${CONTINUE_ON_ERROR:-true}" == "true" ]]; then
             echo -e "${YELLOW}Continuing with remaining phases...${NC}"
         else
             return $exit_code
@@ -220,6 +229,13 @@ run_phase() {
 # ---- Commands ----
 cmd_init() {
     local name="${ENGAGEMENT_NAME:-engagement}"
+
+    # Validate engagement name — prevent path traversal and special chars
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        error "Invalid engagement name: '${name}'"
+        error "Name must contain only letters, numbers, hyphens, and underscores."
+        exit 1
+    fi
 
     show_banner
     log "Initializing new engagement: ${name}"
@@ -232,20 +248,23 @@ cmd_init() {
     # Set up directory structure
     setup_engagement_dir "$name"
 
+    # Persist state so 'run' can find this engagement across invocations
+    echo "ENGAGEMENT_DIR=${ENGAGEMENT_DIR}" > "${PROJECT_ROOT}/.netrecon_state"
+
     echo ""
     success "Engagement ready! Next steps:"
-    echo "  1. Run:  ./netrecon.sh resume ${ENGAGEMENT_DIR}"
-    echo "  2. Then: ./netrecon.sh run all"
+    echo "  1. Run:  ./netrecon.sh run all"
+    echo "  2. Or:   ./netrecon.sh resume ${ENGAGEMENT_DIR}"
     echo ""
 }
 
 cmd_resume() {
     local dir="${RESUME_DIR}"
 
-    if [ -z "$dir" ]; then
+    if [[ -z "$dir" ]]; then
         # Find most recent engagement
         dir=$(ls -dt "${PROJECT_ROOT}/engagements/"*/ 2>/dev/null | head -1)
-        if [ -z "$dir" ]; then
+        if [[ -z "$dir" ]]; then
             error "No engagements found. Run './netrecon.sh init <name>' first."
             exit 1
         fi
@@ -255,6 +274,9 @@ cmd_resume() {
     show_banner
     load_targets || exit 1
     use_engagement_dir "$dir"
+
+    # Persist state so 'run' can find this engagement across invocations
+    echo "ENGAGEMENT_DIR=${ENGAGEMENT_DIR}" > "${PROJECT_ROOT}/.netrecon_state"
 
     echo ""
     success "Engagement resumed: ${ENGAGEMENT_DIR}"
@@ -268,16 +290,24 @@ cmd_run() {
 
     show_banner
 
-    # Ensure engagement is set up
-    if [ -z "${ENGAGEMENT_DIR:-}" ] || [ ! -d "${ENGAGEMENT_DIR:-/nonexistent}" ]; then
-        # Try auto-resume
-        load_targets || exit 1
-        local dir=$(ls -dt "${PROJECT_ROOT}/engagements/"*/ 2>/dev/null | head -1)
-        if [ -n "$dir" ]; then
-            use_engagement_dir "$dir"
-        else
-            error "No engagement found. Run './netrecon.sh init <name>' first."
-            exit 1
+    # Ensure engagement is set up — check persisted state, then auto-detect
+    if [[ -z "${ENGAGEMENT_DIR:-}" ]] || [[ ! -d "${ENGAGEMENT_DIR:-/nonexistent}" ]]; then
+        # Try persisted state first
+        if [[ -f "${PROJECT_ROOT}/.netrecon_state" ]]; then
+            source "${PROJECT_ROOT}/.netrecon_state"
+        fi
+
+        # Still no valid dir? Try auto-resume from latest
+        if [[ -z "${ENGAGEMENT_DIR:-}" ]] || [[ ! -d "${ENGAGEMENT_DIR:-/nonexistent}" ]]; then
+            load_targets || exit 1
+            local dir
+            dir=$(ls -dt "${PROJECT_ROOT}/engagements/"*/ 2>/dev/null | head -1)
+            if [[ -n "$dir" ]]; then
+                use_engagement_dir "$dir"
+            else
+                error "No engagement found. Run './netrecon.sh init <name>' first."
+                exit 1
+            fi
         fi
     fi
 
@@ -294,9 +324,10 @@ cmd_run() {
     echo -e "${BOLD}Starting in ${PREFLIGHT_WAIT:-5} seconds... Press Ctrl+C to abort.${NC}"
     sleep ${PREFLIGHT_WAIT:-5}
 
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
 
-    if [ "$phase" == "all" ]; then
+    if [[ "$phase" == "all" ]]; then
         run_phase 1 "$target"
         run_phase 2 "$target"
         run_phase 3 "$target"
@@ -309,7 +340,7 @@ cmd_run() {
         echo -e "${YELLOW}════════════════════════════════════════════════════════════${NC}"
         echo ""
 
-        if [ "$SKIP_PHASE6" == "false" ]; then
+        if [[ "$SKIP_PHASE6" == "false" ]]; then
             run_phase 6 "$target"
         else
             echo -e "${YELLOW} PHASE 6: Protocol Analysis — SKIPPED (--skip-phase6)${NC}"
@@ -321,39 +352,52 @@ cmd_run() {
     fi
 
     # Final summary
-    local end_time=$(date +%s)
+    local end_time
+    end_time=$(date +%s)
     local total=$(( end_time - start_time ))
     local hours=$(( total / 3600 ))
     local mins=$(( (total % 3600) / 60 ))
     local secs=$(( total % 60 ))
 
     echo ""
-    echo -e "${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║   ALL PHASES COMPLETE                                     ║${NC}"
-    echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
+    if [[ "$phase" == "all" ]]; then
+        echo -e "${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BOLD}║   ALL PHASES COMPLETE                                     ║${NC}"
+        echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
+    else
+        echo -e "${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
+        printf -v _pad "%-55s" "PHASE ${phase} COMPLETE"
+        echo -e "${BOLD}║   ${_pad}║${NC}"
+        echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
+    fi
     echo ""
     echo -e "  Runtime:      ${hours}h ${mins}m ${secs}s"
     echo -e "  Engagement:   ${ENGAGEMENT_DIR}"
     echo -e "  Log:          ${LOGFILE:-N/A}"
     echo ""
 
-    # List key output files
-    echo -e "  ${BOLD}Key Output Files:${NC}"
-    for site in $(echo "${!TARGETS[@]}" | tr ' ' '\n' | sort); do
-        echo -e "  ${CYAN}${site^^}:${NC}"
-        [ -f "$(site_dir "$site")/vulns/VULNERABILITY_SUMMARY.txt" ] && echo "    ├── vulns/VULNERABILITY_SUMMARY.txt"
-        [ -f "$(site_dir "$site")/enum/SNMP_FINDINGS_SUMMARY.txt" ] && echo "    ├── enum/SNMP_FINDINGS_SUMMARY.txt"
-        [ -f "$(site_dir "$site")/nmap/network_device_ports_SUMMARY.txt" ] && echo "    └── nmap/network_device_ports_SUMMARY.txt"
-    done
+    # List key output files — only for 'all' runs or when showing relevant site
+    if [[ "$phase" == "all" ]]; then
+        echo -e "  ${BOLD}Key Output Files:${NC}"
+        for site in $(echo "${!TARGETS[@]}" | tr ' ' '\n' | sort); do
+            if [[ "$target" != "all" ]] && [[ "$target" != "$site" ]]; then
+                continue
+            fi
+            echo -e "  ${CYAN}${site^^}:${NC}"
+            [[ -f "$(site_dir "$site")/vulns/VULNERABILITY_SUMMARY.txt" ]] && echo "    ├── vulns/VULNERABILITY_SUMMARY.txt"
+            [[ -f "$(site_dir "$site")/enum/SNMP_FINDINGS_SUMMARY.txt" ]] && echo "    ├── enum/SNMP_FINDINGS_SUMMARY.txt"
+            [[ -f "$(site_dir "$site")/nmap/network_device_ports_SUMMARY.txt" ]] && echo "    └── nmap/network_device_ports_SUMMARY.txt"
+        done
 
-    echo ""
-    echo -e "  ${BOLD}Consolidated Reports:${NC}"
-    ls -1t "${ENGAGEMENT_DIR}"/NETRECON_REPORT_*.txt 2>/dev/null | head -1 | while read f; do
-        echo "    ├── $(basename "$f")"
-    done
-    ls -1t "${ENGAGEMENT_DIR}"/NETRECON_FINDINGS_*.csv 2>/dev/null | head -1 | while read f; do
-        echo "    └── $(basename "$f")"
-    done
+        echo ""
+        echo -e "  ${BOLD}Consolidated Reports:${NC}"
+        ls -1t "${ENGAGEMENT_DIR}"/NETRECON_REPORT_*.txt 2>/dev/null | head -1 | while read -r f; do
+            echo "    ├── $(basename "$f")"
+        done
+        ls -1t "${ENGAGEMENT_DIR}"/NETRECON_FINDINGS_*.csv 2>/dev/null | head -1 | while read -r f; do
+            echo "    └── $(basename "$f")"
+        done
+    fi
     echo ""
     echo -e "${GREEN}Done! Review the report and customize before presenting.${NC}"
 }
@@ -362,8 +406,9 @@ cmd_status() {
     show_banner
     load_targets || exit 1
 
-    local dir=$(ls -dt "${PROJECT_ROOT}/engagements/"*/ 2>/dev/null | head -1)
-    if [ -z "$dir" ]; then
+    local dir
+    dir=$(ls -dt "${PROJECT_ROOT}/engagements/"*/ 2>/dev/null | head -1)
+    if [[ -z "$dir" ]]; then
         warn "No engagements found."
         return
     fi

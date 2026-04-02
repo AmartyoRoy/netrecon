@@ -36,6 +36,9 @@ desktop.ini
 .idea/
 *.sublime-*
 
+# Runtime state (created by resume/init)
+.netrecon_state
+
 # Custom config with real targets (template is tracked)
 config/targets.conf
 
