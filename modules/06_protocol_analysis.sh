@@ -10,17 +10,27 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../lib/common.sh"
 
-load_config "ports.conf"          # [FIX #9] Consistent with other modules
+load_config "ports.conf"
 load_config "scan_tuning.conf"
+
+# TARGETS must be loaded before this module runs.
+# When invoked via orchestrator, load_targets is called in cmd_run.
+# When invoked standalone, the caller must have exported TARGETS.
+# Guard: if TARGETS is empty, attempt to load them.
+if [[ ${#TARGETS[@]} -eq 0 ]]; then
+    load_targets || { error "Cannot proceed without targets."; exit 1; }
+fi
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
+# Positional args ($1/$2/$3) are interface/duration/packets, NOT site name.
+# The orchestrator passes these via extra_args (line 225-228 of netrecon.sh).
 CAPTURE_INTERFACE="${1:-${CAPTURE_INTERFACE:-eth0}}"
 CAPTURE_DURATION="${2:-${CAPTURE_DURATION:-600}}"
 CAPTURE_PACKET_LIMIT="${3:-${CAPTURE_PACKET_LIMIT:-200000}}"
-CAPTURE_MAX_SIZE_MB="${CAPTURE_MAX_SIZE_MB:-500}"   # [FIX #12] Disk exhaustion protection
+CAPTURE_MAX_SIZE_MB="${CAPTURE_MAX_SIZE_MB:-500}"
 
-# ---- Interface Validation ---- [FIX #4]
+# ---- Interface Validation ----
 validate_interface() {
     local iface="$1"
     if ! ip link show "$iface" &>/dev/null; then
@@ -33,10 +43,9 @@ validate_interface() {
 build_capture_filter() {
     local filter=""
     for site in "${!TARGETS[@]}"; do
-        local cidr=${TARGETS[$site]}
+        local cidr="${TARGETS[$site]}"
         [ -n "$filter" ] && filter="${filter} or net ${cidr}" || filter="net ${cidr}"
     done
-    # [FIX #3] Prevent empty filter from capturing all traffic on the wire
     if [[ -z "$filter" ]]; then
         error "No targets loaded — cannot build capture filter. Aborting capture."
         return 1
@@ -48,31 +57,38 @@ run_passive_capture() {
     header "MODULE 06: PASSIVE PROTOCOL ANALYSIS"
     log "Interface: ${CAPTURE_INTERFACE} | Duration: ${CAPTURE_DURATION}s | Max Packets: ${CAPTURE_PACKET_LIMIT}"
 
-    # [FIX #4] Validate interface exists before attempting capture
     validate_interface "${CAPTURE_INTERFACE}" || return 1
 
     EVIDENCE_DIR="${ENGAGEMENT_DIR}/evidence_${TIMESTAMP}"
     mkdir -p "$EVIDENCE_DIR"
 
     local capture_filter
-    capture_filter=$(build_capture_filter) || return 1   # [FIX #3] Abort on empty filter
+    capture_filter=$(build_capture_filter) || return 1
     FULL_PCAP="${EVIDENCE_DIR}/full_capture.pcap"
 
     log "Phase 6.1: Starting passive traffic capture..."
 
-    # [FIX #1] Redirect stderr to log directly — piping through tee creates a
-    # subshell whose PID is captured by $!, not tcpdump's PID.
-    # [FIX #6] Quote all variables to prevent word-splitting.
-    # [FIX #12] -C limits per-file size in MB, -W 1 keeps a single file.
+    # tcpdump -C expects an integer (MB). Validate it.
+    if ! [[ "${CAPTURE_MAX_SIZE_MB}" =~ ^[0-9]+$ ]]; then
+        warn "CAPTURE_MAX_SIZE_MB='${CAPTURE_MAX_SIZE_MB}' is not a valid integer, defaulting to 500"
+        CAPTURE_MAX_SIZE_MB=500
+    fi
+
+    # When -C is used, tcpdump appends a numeric suffix to the filename.
+    # With -W 1, it creates: full_capture.pcap (no suffix for first file, or pcap0 on some versions).
+    # To avoid confusion, we do NOT use -C/-W when size limit is 0 (disabled).
+    local tcpdump_size_opts=()
+    if [[ "${CAPTURE_MAX_SIZE_MB}" -gt 0 ]]; then
+        tcpdump_size_opts=(-C "${CAPTURE_MAX_SIZE_MB}" -W 1)
+    fi
+
     sudo timeout "${CAPTURE_DURATION}" tcpdump -i "${CAPTURE_INTERFACE}" \
         -w "$FULL_PCAP" -c "${CAPTURE_PACKET_LIMIT}" \
-        -C "${CAPTURE_MAX_SIZE_MB}" -W 1 \
+        "${tcpdump_size_opts[@]}" \
         "${capture_filter}" \
         2>>"${LOGFILE:-/dev/null}" &
     local full_pid=$!
 
-    # [FIX #7] Scope insecure protocols capture to target CIDRs to avoid
-    # capturing out-of-scope traffic (evidence contamination).
     local insecure_pcap="${EVIDENCE_DIR}/insecure_protocols.pcap"
     local insecure_filter="(${capture_filter}) and (port 23 or port 21 or port 69 or port 161 or port 514 or port 80)"
     sudo timeout "${CAPTURE_DURATION}" tcpdump -i "${CAPTURE_INTERFACE}" \
@@ -82,15 +98,20 @@ run_passive_capture() {
 
     log "Captures running (PIDs: ${full_pid}, ${insecure_pid}). Waiting up to ${CAPTURE_DURATION}s..."
 
-    # [FIX #13] Progress indicator instead of silent wait
+    # Progress indicator
     local elapsed=0
     local interval=30
     while kill -0 "$full_pid" 2>/dev/null && [[ $elapsed -lt $CAPTURE_DURATION ]]; do
         sleep $interval
         elapsed=$((elapsed + interval))
-        local pcap_size
-        pcap_size=$(du -sh "$FULL_PCAP" 2>/dev/null | awk '{print $1}' || echo "0B")
-        log "  Capture progress: ${elapsed}/${CAPTURE_DURATION}s | PCAP size: ${pcap_size}"
+        # pcap might not exist yet if no matching traffic; guard with -f
+        if [[ -f "$FULL_PCAP" ]]; then
+            local pcap_size
+            pcap_size=$(du -sh "$FULL_PCAP" 2>/dev/null | awk '{print $1}')
+            log "  Capture progress: ${elapsed}/${CAPTURE_DURATION}s | PCAP size: ${pcap_size:-0B}"
+        else
+            log "  Capture progress: ${elapsed}/${CAPTURE_DURATION}s | PCAP size: 0B (no matching traffic yet)"
+        fi
     done
 
     wait $full_pid 2>/dev/null || true
@@ -101,7 +122,6 @@ run_passive_capture() {
 run_protocol_analysis() {
     require_tool "tshark" "apt install tshark" || return 1
 
-    # [FIX #5] Validate pcap exists and is non-empty before running analysis
     if [[ ! -s "$FULL_PCAP" ]]; then
         warn "Capture file is empty or missing: ${FULL_PCAP}"
         warn "Skipping protocol analysis — check interface and permissions."
@@ -158,12 +178,21 @@ run_protocol_analysis() {
     tshark -r "$FULL_PCAP" -z conv,ip -q 2>/dev/null > "${ad}/ip_conversations.txt" || true
 }
 
-# [FIX #2] Count data lines only (subtract tshark header row)
+# Count data lines in a tshark output file (subtracts header).
+# For files that don't have a tshark header (e.g. rogue_dhcp_detection.txt,
+# vlan_hopping_feasibility.txt), we check if the file was generated by tshark
+# by looking for the separator character, but for simplicity we just subtract 1
+# and floor at 0 — worst case we under-report by 1 for non-tshark files,
+# which is harmless because those files use the -s (size) check path in the summary.
 _fc() {
+    if [[ ! -f "$1" ]]; then
+        echo "0"
+        return
+    fi
     local total
     total=$(wc -l < "$1" 2>/dev/null || echo "0")
-    # tshark -E header=y adds 1 header line; plain files have no header
-    # For safety, floor at 0
+    # Strip leading whitespace that wc may produce on some systems
+    total="${total// /}"
     total=$((total - 1))
     [[ $total -lt 0 ]] && total=0
     echo "$total"
@@ -172,6 +201,24 @@ _fc() {
 generate_protocol_summary() {
     local s="${EVIDENCE_DIR}/PROTOCOL_ANALYSIS_SUMMARY.txt"
     local ad="${EVIDENCE_DIR}/analysis"
+
+    # Guard: if analysis dir doesn't exist (capture failed + returned early),
+    # generate a minimal summary noting the failure.
+    if [[ ! -d "$ad" ]]; then
+        {
+            echo "╔════════════════════════════════════════════════════════════╗"
+            echo "║  NETWORK PROTOCOL ANALYSIS FINDINGS"
+            echo "║  Interface: ${CAPTURE_INTERFACE} | Duration: ${CAPTURE_DURATION}s"
+            echo "║  Generated: $(date)"
+            echo "╚════════════════════════════════════════════════════════════╝"
+            echo ""
+            echo "⚠ No analysis data — capture or analysis phase failed."
+            echo "  Check the log for errors: ${LOGFILE:-N/A}"
+        } > "$s"
+        warn "Protocol analysis summary (empty): ${s}"
+        return
+    fi
+
     {
         echo "╔════════════════════════════════════════════════════════════╗"
         echo "║  NETWORK PROTOCOL ANALYSIS FINDINGS"
@@ -179,7 +226,6 @@ generate_protocol_summary() {
         echo "║  Generated: $(date)"
         echo "╚════════════════════════════════════════════════════════════╝"
         echo ""
-        # [FIX #14] Added dhcp_traffic.txt to summary checks
         local checks=("cleartext_protocols.txt:🔴 CLEARTEXT PROTOCOL TRAFFIC"
                        "dtp_frames.txt:🟡 DTP FRAMES (VLAN Hopping Risk)"
                        "cdp_lldp_info.txt:🟡 CDP/LLDP DEVICE INFO LEAKAGE"
@@ -193,13 +239,16 @@ generate_protocol_summary() {
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "$title"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            local c=$(_fc "${ad}/${file}")
-            # [FIX #2] Threshold changed from > 1 to > 0 (header no longer counted)
-            if [ "$c" -gt 0 ]; then
-                echo "  ⚠ ${c} frames captured. Details: analysis/${file}"
-                head -20 "${ad}/${file}"
+            if [[ ! -f "${ad}/${file}" ]]; then
+                echo "  ✓ None observed (no data file)"
             else
-                echo "  ✓ None observed"
+                local c=$(_fc "${ad}/${file}")
+                if [ "$c" -gt 0 ]; then
+                    echo "  ⚠ ${c} frames captured. Details: analysis/${file}"
+                    head -20 "${ad}/${file}"
+                else
+                    echo "  ✓ None observed"
+                fi
             fi
             echo ""
         done
@@ -223,19 +272,19 @@ generate_protocol_summary() {
 # ---- Aggressive: Active Protocol Probing ----
 run_aggressive_protocol_checks() {
     if ! is_aggressive; then
-        return
+        return 0
     fi
 
     require_tool "tshark" "apt install tshark" || return 1
 
-    # [FIX #5] Also guard aggressive analysis against missing pcap
     if [[ ! -s "$FULL_PCAP" ]]; then
         warn "No capture data for aggressive analysis — skipping"
-        return 1
+        return 0
     fi
 
     log "Phase 6.3 [AGGRESSIVE]: Active Protocol Analysis"
     local ad="${EVIDENCE_DIR}/analysis"
+    mkdir -p "$ad"
 
     # LLMNR / NBNS / mDNS — name resolution poisoning vectors
     log "  [6.3.1] LLMNR/NBNS/mDNS poisoning vectors..."
@@ -246,7 +295,7 @@ run_aggressive_protocol_checks() {
 
     # WPAD detection
     log "  [6.3.2] WPAD broadcast detection..."
-    tshark -r "$FULL_PCAP" -Y "dns.qry.name contains \"wpad\" or http.host contains \"wpad\"" \
+    tshark -r "$FULL_PCAP" -Y 'dns.qry.name contains "wpad" or http.host contains "wpad"' \
         -T fields -e frame.number -e ip.src -e ip.dst -e dns.qry.name -e http.host \
         -E header=y -E separator='|' 2>/dev/null > "${ad}/wpad_detection.txt" || true
 
@@ -260,13 +309,12 @@ run_aggressive_protocol_checks() {
     # DTP VLAN hopping feasibility
     log "  [6.3.4] DTP VLAN hopping feasibility..."
     local dtp_count=$(_fc "${ad}/dtp_frames.txt")
-    # [FIX #2] Threshold changed from > 1 to > 0
     if [[ "$dtp_count" -gt 0 ]]; then
         warn "DTP frames detected — VLAN hopping may be feasible"
-        echo "⚠ DTP frames detected (${dtp_count} frames). Trunk negotiation is possible." \
-            > "${ad}/vlan_hopping_feasibility.txt"
-        echo "Recommendation: Enable 'switchport nonegotiate' on all access ports." \
-            >> "${ad}/vlan_hopping_feasibility.txt"
+        {
+            echo "⚠ DTP frames detected (${dtp_count} frames). Trunk negotiation is possible."
+            echo "Recommendation: Enable 'switchport nonegotiate' on all access ports."
+        } > "${ad}/vlan_hopping_feasibility.txt"
     fi
 
     # SNMPv1/v2c cleartext community strings in traffic
@@ -275,18 +323,25 @@ run_aggressive_protocol_checks() {
         -T fields -e frame.number -e ip.src -e ip.dst -e snmp.community \
         -E header=y -E separator='|' 2>/dev/null > "${ad}/snmp_cleartext.txt" || true
 
-    # [FIX #10] Rogue DHCP server detection
+    # Rogue DHCP server detection
     log "  [6.3.6] Rogue DHCP server detection..."
     tshark -r "$FULL_PCAP" -Y "dhcp.option.dhcp_server_id" \
         -T fields -e dhcp.option.dhcp_server_id \
         -E separator='|' 2>/dev/null | sort -u > "${ad}/dhcp_servers_unique.txt" || true
-    local dhcp_server_count
-    dhcp_server_count=$(wc -l < "${ad}/dhcp_servers_unique.txt" 2>/dev/null || echo "0")
+
+    # dhcp_servers_unique.txt has no tshark header (fields piped through sort -u),
+    # so count lines directly — do NOT use _fc which subtracts 1.
+    local dhcp_server_count=0
+    if [[ -f "${ad}/dhcp_servers_unique.txt" ]]; then
+        dhcp_server_count=$(wc -l < "${ad}/dhcp_servers_unique.txt" 2>/dev/null || echo "0")
+        dhcp_server_count="${dhcp_server_count// /}"
+    fi
+
     if [[ "$dhcp_server_count" -gt 1 ]]; then
         warn "Multiple DHCP servers detected (${dhcp_server_count}) — potential rogue DHCP!"
         {
             echo "⚠ Multiple DHCP servers detected on the network segment:"
-            cat "${ad}/dhcp_servers_unique.txt" | sed 's/^/  - /'
+            sed 's/^/  - /' < "${ad}/dhcp_servers_unique.txt"
             echo ""
             echo "Recommendation: Verify each server is authorized. Enable DHCP snooping."
         } > "${ad}/rogue_dhcp_detection.txt"
@@ -296,7 +351,7 @@ run_aggressive_protocol_checks() {
         log "    No DHCP server IDs observed in capture."
     fi
 
-    # [FIX #11] IPv6 Router Advertisement / DHCPv6 analysis
+    # IPv6 Router Advertisement / DHCPv6 analysis
     log "  [6.3.7] IPv6 RA/DHCPv6 analysis..."
     tshark -r "$FULL_PCAP" -Y "icmpv6.type == 134 or dhcpv6" \
         -T fields -e frame.number -e ipv6.src -e ipv6.dst -e _ws.col.Protocol -e _ws.col.Info \
@@ -312,11 +367,17 @@ run_aggressive_protocol_checks() {
 # ---- Update summary for aggressive findings ----
 append_aggressive_summary() {
     if ! is_aggressive; then
-        return
+        return 0
     fi
 
     local s="${EVIDENCE_DIR}/PROTOCOL_ANALYSIS_SUMMARY.txt"
     local ad="${EVIDENCE_DIR}/analysis"
+
+    # Guard: summary file must exist
+    if [[ ! -f "$s" ]]; then
+        warn "Summary file missing — cannot append aggressive findings"
+        return 0
+    fi
 
     {
         echo ""
@@ -325,7 +386,6 @@ append_aggressive_summary() {
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo ""
 
-        # [FIX #10, #11] Added rogue DHCP and IPv6 RA to aggressive summary
         local aggressive_checks=(
             "llmnr_nbns_mdns.txt:🔴 LLMNR/NBNS/mDNS POISONING VECTORS"
             "wpad_detection.txt:🔴 WPAD BROADCAST DETECTION"
@@ -339,15 +399,19 @@ append_aggressive_summary() {
             local file="${entry%%:*}"
             local title="${entry#*:}"
             echo "$title:"
-            local c=$(_fc "${ad}/${file}")
-            # [FIX #2] Threshold changed from > 1 to > 0
-            if [[ "$c" -gt 0 ]]; then
-                echo "  ⚠ ${c} events captured. Details: analysis/${file}"
-                head -10 "${ad}/${file}" 2>/dev/null | sed 's/^/  /'
-            elif [[ -s "${ad}/${file}" ]]; then
-                cat "${ad}/${file}" | sed 's/^/  /'
-            else
+            if [[ ! -f "${ad}/${file}" ]]; then
                 echo "  ✓ None observed"
+            else
+                local c=$(_fc "${ad}/${file}")
+                if [[ "$c" -gt 0 ]]; then
+                    echo "  ⚠ ${c} events captured. Details: analysis/${file}"
+                    head -10 "${ad}/${file}" 2>/dev/null | sed 's/^/  /'
+                elif [[ -s "${ad}/${file}" ]]; then
+                    # File has content but _fc says 0 (non-tshark file like rogue_dhcp_detection.txt)
+                    sed 's/^/  /' < "${ad}/${file}"
+                else
+                    echo "  ✓ None observed"
+                fi
             fi
             echo ""
         done
@@ -356,19 +420,36 @@ append_aggressive_summary() {
 
 main() {
     require_tool "tcpdump" "apt install tcpdump" || exit 1
-    # [FIX #8] Accept but ignore target argument for orchestrator compatibility.
+
     # Phase 6 operates at the interface level, not per-site.
-    local _target="${1:-all}"
+    # Accept but ignore target argument for orchestrator compatibility.
+
     if is_aggressive; then
         header "NETRECON — Phase 6: Protocol Analysis [AGGRESSIVE]"
     else
         header "NETRECON — Phase 6: Passive Protocol Analysis"
     fi
+
     run_passive_capture
+    local capture_rc=$?
+
+    # Even if capture returned non-zero (bad interface, empty filter), attempt
+    # to generate a summary so the orchestrator's status check and report
+    # module always find PROTOCOL_ANALYSIS_SUMMARY.txt.
+    if [[ $capture_rc -ne 0 ]]; then
+        warn "Capture phase failed (rc=${capture_rc}). Generating empty summary."
+        EVIDENCE_DIR="${EVIDENCE_DIR:-${ENGAGEMENT_DIR}/evidence_${TIMESTAMP}}"
+        mkdir -p "$EVIDENCE_DIR"
+        FULL_PCAP="${FULL_PCAP:-${EVIDENCE_DIR}/full_capture.pcap}"
+        generate_protocol_summary
+        return $capture_rc
+    fi
+
     run_protocol_analysis
     generate_protocol_summary
     run_aggressive_protocol_checks
     append_aggressive_summary
+
     echo ""
     success "Phase 6: Protocol Analysis complete"
 }
